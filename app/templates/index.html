@@ -1,0 +1,665 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WatchWhat</title>
+    <style>
+      body { font-family: "SF Pro Text", "PingFang SC", sans-serif; margin: 0; background: #f4f6fb; color: #10203a; }
+      .container { max-width: 920px; margin: 24px auto; padding: 16px; }
+      .card { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 8px 22px rgba(18, 32, 58, 0.08); }
+      h1 { margin: 0 0 16px; font-size: 28px; }
+      h2 { margin: 0 0 10px; font-size: 18px; }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; }
+      input, textarea, select { flex: 1; min-width: 220px; border: 1px solid #d5dceb; border-radius: 8px; padding: 10px; font-size: 14px; }
+      button { border: 0; border-radius: 8px; padding: 10px 14px; font-size: 14px; background: #0f4ccf; color: #fff; cursor: pointer; }
+      button.secondary { background: #5b6d8d; }
+      .muted { color: #4f627f; font-size: 13px; }
+      .result { border-bottom: 1px solid #edf1f8; padding: 10px 0; }
+      .result:last-child { border-bottom: 0; }
+      .hidden { display: none; }
+      .friend-list { border: 1px solid #d5dceb; border-radius: 8px; padding: 8px; background: #fff; }
+      .friend-row { display: grid; grid-template-columns: 24px 1fr 110px; gap: 8px; align-items: center; padding: 6px 4px; border-bottom: 1px solid #edf1f8; }
+      .friend-row:last-child { border-bottom: 0; }
+      .friend-meta { display: flex; flex-direction: column; }
+      .friend-meta .secondary { color: #5b6d8d; font-size: 12px; }
+      .friend-weight { min-width: 0; }
+      .friend-warning { color: #8a5a00; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>WatchWhat</h1>
+
+      <div class="card">
+        <h2>1) 同步豆瓣历史</h2>
+        <div class="row">
+          <input id="username" placeholder="豆瓣用户名、/people/... 链接，或 /mine?status=collect 链接" />
+          <select id="syncScope">
+            <option value="book" selected>仅书籍</option>
+            <option value="movie_tv">仅影视</option>
+            <option value="all">书籍+影视</option>
+            <option value="auto">自动判断</option>
+          </select>
+          <input id="cookie" placeholder="可选: Cookie（自动捕获后会在本机保存）" />
+          <button id="autoCookieBtn" class="secondary">自动捕获Cookie</button>
+          <button id="syncBtn">开始同步</button>
+          <button id="syncFriendsBtn" class="secondary">同步好友</button>
+        </div>
+        <p id="cookieStatus" class="muted">可手填 Cookie，或点击“自动捕获Cookie”后登录豆瓣（会在本机保存，下次可复用）。</p>
+        <p id="syncStatus" class="muted">尚未开始</p>
+        <p id="friendSyncStatus" class="muted"></p>
+        <p id="syncPreview" class="muted"></p>
+        <div id="syncItems"></div>
+        <div class="row" style="margin-top:8px;">
+          <button id="libraryBtn" class="secondary">查看当前库内容</button>
+        </div>
+        <p id="librarySummary" class="muted"></p>
+        <div id="libraryItems"></div>
+      </div>
+
+      <div class="card">
+        <h2>2) 生成推荐</h2>
+        <div class="row">
+          <textarea id="query" rows="2" placeholder="例如：想看轻松、近五年、评分高的内容"></textarea>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <input id="friends" placeholder="可选：好友用户名（逗号分隔，如 friend_a,friend_b）" />
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <input id="friendWeights" placeholder="可选：好友权重（默认全为1，格式 user:1,user2:0.8）" />
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <input id="friendAliases" placeholder="可选：好友别名（用于数字ID，格式 190443634:小明,143934864:同事A）" />
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div id="friendProfilesHint" class="muted">同步好友后会显示“昵称 + 用户名”列表，可勾选并单独调整权重。</div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div id="friendProfiles" class="friend-list hidden"></div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <button id="recommendBtn">推荐</button>
+          <button id="followupBtn" class="secondary hidden">提交追问答案</button>
+          <input id="followupAnswer" class="hidden" placeholder="补充偏好" />
+        </div>
+        <p id="profile" class="muted"></p>
+        <p id="constraintsLine" class="muted"></p>
+        <div id="results"></div>
+      </div>
+    </div>
+
+    <script>
+      let currentJobId = null;
+      let cookieCaptureJobId = null;
+      let followupSessionId = null;
+      let currentFriendProfiles = [];
+
+      (function restoreState() {
+        const saved = localStorage.getItem('watchwhat_username');
+        if (saved) document.getElementById('username').value = saved;
+        const savedScope = localStorage.getItem('watchwhat_sync_scope');
+        if (savedScope) document.getElementById('syncScope').value = savedScope;
+        const savedAliases = localStorage.getItem('watchwhat_friend_aliases');
+        if (savedAliases) document.getElementById('friendAliases').value = savedAliases;
+        fetch('/api/cookie/status?source=douban').then(r => r.json()).then(data => {
+          const el = document.getElementById('cookieStatus');
+          if (data.has_login_cookie) {
+            el.textContent = '\u2705 \u5df2\u6709\u767b\u5f55\u6001 Cookie\uff08dbcl2\uff09\uff0c\u65e0\u9700\u91cd\u65b0\u6355\u83b7\u3002\u76f4\u63a5\u540c\u6b65\u5373\u53ef\u3002';
+          } else if (data.has_cookie) {
+            el.textContent = '\u26a0\ufe0f \u6709 Cookie \u4f46\u7f3a\u5c11\u767b\u5f55\u6001\uff08dbcl2\uff09\uff0c\u5efa\u8bae\u91cd\u65b0\u6355\u83b7\u3002';
+          }
+        }).catch(() => {});
+      })();
+
+      async function postJSON(url, body) {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.detail || "request failed");
+        }
+        return data;
+      }
+
+      function parseFriendWeights(raw) {
+        const result = {};
+        const compact = (raw || "").trim();
+        if (!compact) return result;
+        const pairs = compact.split(",").map(x => x.trim()).filter(Boolean);
+        for (const pair of pairs) {
+          const idx = pair.lastIndexOf(":");
+          if (idx <= 0) continue;
+          const name = pair.slice(0, idx).trim();
+          const weightText = pair.slice(idx + 1).trim();
+          if (!name || !weightText) continue;
+          const weight = Number(weightText);
+          if (!Number.isFinite(weight)) continue;
+          result[name] = weight;
+        }
+        return result;
+      }
+
+      function parseFriendAliases(raw) {
+        const result = {};
+        const compact = (raw || "").trim();
+        if (!compact) return result;
+        const pairs = compact.split(",").map(x => x.trim()).filter(Boolean);
+        for (const pair of pairs) {
+          const idx = pair.lastIndexOf(":");
+          if (idx <= 0) continue;
+          const key = pair.slice(0, idx).trim();
+          const alias = pair.slice(idx + 1).trim();
+          if (!key || !alias) continue;
+          result[key] = alias;
+        }
+        return result;
+      }
+
+      function loadKnownFriendNameMap() {
+        try {
+          const raw = localStorage.getItem("watchwhat_friend_name_map");
+          if (!raw) return {};
+          const parsed = JSON.parse(raw);
+          return parsed && typeof parsed === "object" ? parsed : {};
+        } catch (err) {
+          return {};
+        }
+      }
+
+      function saveKnownFriendNameMap(map) {
+        try {
+          localStorage.setItem("watchwhat_friend_name_map", JSON.stringify(map || {}));
+        } catch (err) {}
+      }
+
+      function mergeKnownFriendNames(profiles) {
+        const known = loadKnownFriendNameMap();
+        for (const profile of profiles || []) {
+          const username = String(profile?.username || "").trim();
+          const displayName = String(profile?.display_name || "").trim();
+          if (!username || !displayName) continue;
+          if (displayName === username) continue;
+          known[username] = displayName;
+        }
+        saveKnownFriendNameMap(known);
+        return known;
+      }
+
+      function mergeAliasesWithProfiles(existingAliasRaw, profiles) {
+        const aliasMap = parseFriendAliases(existingAliasRaw || "");
+        const known = loadKnownFriendNameMap();
+        for (const profile of profiles || []) {
+          const username = String(profile?.username || "").trim();
+          if (!username || !/^\d+$/.test(username)) continue;
+          const displayName = String(profile?.display_name || "").trim();
+          const candidate = displayName && displayName !== username ? displayName : (known[username] || "");
+          if (!candidate) continue;
+          if (!aliasMap[username]) aliasMap[username] = candidate;
+        }
+        const rows = Object.entries(aliasMap).map(([id, name]) => `${id}:${name}`);
+        return rows.join(",");
+      }
+
+      function buildDefaultFriendWeights(friendUsernames, existingWeightRaw) {
+        const existing = parseFriendWeights(existingWeightRaw || "");
+        const rows = [];
+        for (const name of friendUsernames) {
+          if (!name) continue;
+          const value = existing[name];
+          if (Number.isFinite(value)) {
+            rows.push(`${name}:${value}`);
+          } else {
+            rows.push(`${name}:1`);
+          }
+        }
+        return rows.join(",");
+      }
+
+      function normalizeFriendProfiles(data) {
+        const rawProfiles = Array.isArray(data?.friend_profiles) ? data.friend_profiles : [];
+        const rawUsernames = Array.isArray(data?.friend_usernames) ? data.friend_usernames : [];
+        const known = loadKnownFriendNameMap();
+        const results = [];
+        const seen = new Set();
+
+        for (const raw of rawProfiles) {
+          const username = String(raw?.username || "").trim();
+          if (!username || seen.has(username)) continue;
+          seen.add(username);
+          const rawDisplayName = String(raw?.display_name || "").trim();
+          const displayName = (rawDisplayName && rawDisplayName !== username ? rawDisplayName : (known[username] || rawDisplayName || username));
+          const profileUrl = String(raw?.profile_url || "").trim() || `https://www.douban.com/people/${username}/`;
+          results.push({ username, display_name: displayName, profile_url: profileUrl });
+        }
+        for (const raw of rawUsernames) {
+          const username = String(raw || "").trim();
+          if (!username || seen.has(username)) continue;
+          seen.add(username);
+          const displayName = known[username] || username;
+          results.push({
+            username,
+            display_name: displayName,
+            profile_url: `https://www.douban.com/people/${username}/`,
+          });
+        }
+        return results;
+      }
+
+      function renderFriendProfiles(profiles, existingWeightsRaw) {
+        const root = document.getElementById("friendProfiles");
+        const hint = document.getElementById("friendProfilesHint");
+        const aliasRaw = document.getElementById("friendAliases").value || "";
+        const aliasMap = parseFriendAliases(aliasRaw);
+        const existing = parseFriendWeights(existingWeightsRaw || "");
+        if (!profiles || profiles.length === 0) {
+          root.innerHTML = "";
+          root.classList.add("hidden");
+          hint.textContent = "未发现可用好友，推荐时不会使用好友协同过滤。";
+          return;
+        }
+
+        const unresolvedNumeric = profiles.filter((profile) => {
+          const username = String(profile.username || "").trim();
+          const displayName = String(profile.display_name || "").trim();
+          return /^\d+$/.test(username) && (!aliasMap[username]) && (displayName === "" || displayName === username);
+        }).length;
+
+        root.classList.remove("hidden");
+        if (unresolvedNumeric > 0) {
+          hint.textContent = `已发现 ${profiles.length} 位好友，请勾选要用于推荐的好友（默认全选，权重默认1）。其中 ${unresolvedNumeric} 位仅显示数字ID，可在“好友别名”中标注。`;
+          hint.classList.add("friend-warning");
+        } else {
+          hint.textContent = `已发现 ${profiles.length} 位好友，请勾选要用于推荐的好友（默认全选，权重默认1）。`;
+          hint.classList.remove("friend-warning");
+        }
+        root.innerHTML = profiles.map((profile, idx) => {
+          const username = profile.username;
+          const displayName = profile.display_name || username;
+          const profileUrl = profile.profile_url || `https://www.douban.com/people/${username}/`;
+          const alias = aliasMap[username];
+          const label = alias ? `${alias} (${username})` : (displayName === username ? username : `${displayName} (${username})`);
+          const weight = Number.isFinite(existing[username]) ? existing[username] : 1;
+          return `
+            <label class="friend-row">
+              <input type="checkbox" class="friend-pick" data-username="${username}" checked />
+              <span class="friend-meta">
+                <span>${label}</span>
+                <a class="secondary" href="${profileUrl}" target="_blank" rel="noopener">打开豆瓣主页</a>
+              </span>
+              <input type="number" class="friend-weight" data-username="${username}" min="0.1" max="5" step="0.1" value="${weight}" />
+            </label>
+          `;
+        }).join("");
+      }
+
+      function collectFriendSelection() {
+        const profileRoot = document.getElementById("friendProfiles");
+        const checked = profileRoot.querySelectorAll("input.friend-pick:checked");
+        if (!checked || checked.length === 0) {
+          return null;
+        }
+
+        const selected = [];
+        const weights = {};
+        checked.forEach((box) => {
+          const username = box.getAttribute("data-username");
+          if (!username) return;
+          selected.push(username);
+          const weightInput = profileRoot.querySelector(`input.friend-weight[data-username="${username}"]`);
+          if (!weightInput) {
+            weights[username] = 1;
+            return;
+          }
+          const value = Number(weightInput.value);
+          if (!Number.isFinite(value)) {
+            weights[username] = 1;
+            return;
+          }
+          weights[username] = Math.min(5, Math.max(0.1, value));
+        });
+        return { selected, weights };
+      }
+
+      function renderItems(items) {
+        const results = document.getElementById("results");
+        if (!items || items.length === 0) {
+          results.innerHTML = "<p class='muted'>暂无推荐结果</p>";
+          return;
+        }
+        results.innerHTML = items.map(item => `
+          <div class="result">
+            <div><strong>${item.title}</strong> (${item.type}${item.year ? ` / ${item.year}` : ""})</div>
+            <div class="muted">分数: ${item.score.toFixed(3)} | 原因: ${item.reason}</div>
+            <div><a href="${item.douban_url}" target="_blank" rel="noopener">豆瓣链接</a></div>
+          </div>
+        `).join("");
+      }
+
+      function renderConstraints(info) {
+        const el = document.getElementById("constraintsLine");
+        if (!info) {
+          el.textContent = "";
+          return;
+        }
+        const parts = [];
+        if (Array.isArray(info.strict_types) && info.strict_types.includes("book")) {
+          parts.push("仅书籍");
+        } else if (Array.isArray(info.strict_types) && info.strict_types.length > 0) {
+          parts.push(`仅类型:${info.strict_types.join(",")}`);
+        }
+        if (info.series_grouping) {
+          parts.push("系列归并");
+        }
+        if (info.title_language === "zh_preferred") {
+          parts.push("中文优先");
+        }
+        if (typeof info.deduped_series_count === "number") {
+          parts.push(`已归并 ${info.deduped_series_count} 项系列重复`);
+        }
+        el.textContent = parts.length ? `已启用：${parts.join(" / ")}` : "";
+      }
+
+      function renderLibrary(targetId, items) {
+        const target = document.getElementById(targetId);
+        if (!items || items.length === 0) {
+          target.innerHTML = "<p class='muted'>暂无条目</p>";
+          return;
+        }
+        target.innerHTML = items.map(item => `
+          <div class="result">
+            <div><strong>${item.title}</strong> (${item.type}${item.year ? ` / ${item.year}` : ""})</div>
+            <div class="muted">评分: ${item.rating ?? "-"}${item.interacted_at ? ` | 时间: ${item.interacted_at}` : ""}</div>
+            <div><a href="${item.douban_url}" target="_blank" rel="noopener">豆瓣链接</a></div>
+          </div>
+        `).join("");
+      }
+
+      async function loadLibrary() {
+        const username = document.getElementById("username").value.trim();
+        const summary = document.getElementById("librarySummary");
+        if (!username) {
+          summary.textContent = "请先输入用户名再查看库内容";
+          renderLibrary("libraryItems", []);
+          return;
+        }
+        try {
+          const params = new URLSearchParams({
+            source: "douban",
+            username,
+            limit: "40",
+            offset: "0",
+          });
+          const res = await fetch(`/api/library?${params.toString()}`);
+          const data = await res.json();
+          if (!res.ok) {
+            summary.textContent = `库读取失败: ${data.detail || "未知错误"}`;
+            renderLibrary("libraryItems", []);
+            return;
+          }
+          summary.textContent = `当前库: 影视 ${data.movie_tv_count} | 书籍 ${data.book_count} | 总计 ${data.total}`;
+          renderLibrary("libraryItems", data.items);
+        } catch (err) {
+          summary.textContent = `库读取失败: ${err.message}`;
+          renderLibrary("libraryItems", []);
+        }
+      }
+
+      async function pollSync() {
+        if (!currentJobId) return;
+        const status = document.getElementById("syncStatus");
+        const syncPreview = document.getElementById("syncPreview");
+        const formatCounts = (counts) => {
+          if (!counts) return "";
+          const start = counts.start || {};
+          const end = counts.end || {};
+          const added = counts.added || {};
+          return ` | 起始: 影视${start.movie_tv ?? 0} 书籍${start.book ?? 0} 总${start.total ?? 0} | 结束: 影视${end.movie_tv ?? 0} 书籍${end.book ?? 0} 总${end.total ?? 0} | 新增: 影视${added.movie_tv ?? 0} 书籍${added.book ?? 0} 总${added.total ?? 0}`;
+        };
+
+        const timer = setInterval(async () => {
+          try {
+            const res = await fetch(`/api/sync/${currentJobId}`);
+            const data = await res.json();
+            if (!res.ok) {
+              clearInterval(timer);
+              status.textContent = `同步失败: ${data.detail || "未知错误"}`;
+              return;
+            }
+            const accountPart = data.effective_username ? ` | 账号: ${data.effective_username}` : "";
+            status.textContent = `状态: ${data.status}${accountPart} | 进度: ${data.done}/${data.total} | ${data.message}${formatCounts(data.counts)}`;
+            if (data.added_preview && data.added_preview.length > 0) {
+              syncPreview.textContent = `本次新增条目 ${data.added_preview.length} 条（展示前 ${data.added_preview.length} 条）`;
+              renderLibrary("syncItems", data.added_preview);
+            } else {
+              syncPreview.textContent = "本次新增条目 0 条";
+              renderLibrary("syncItems", []);
+            }
+            if (data.status === "done" || data.status === "failed") {
+              clearInterval(timer);
+              if (data.status === "done") {
+                loadLibrary();
+              }
+            }
+          } catch (err) {
+            clearInterval(timer);
+            status.textContent = `同步失败: ${err.message}`;
+          }
+        }, 1000);
+      }
+
+      async function pollCookieCapture() {
+        if (!cookieCaptureJobId) return;
+        const status = document.getElementById("cookieStatus");
+
+        const timer = setInterval(async () => {
+          try {
+            const res = await fetch(`/api/cookie/auto/${cookieCaptureJobId}`);
+            const data = await res.json();
+            if (!res.ok) {
+              clearInterval(timer);
+              status.textContent = `Cookie捕获失败: ${data.detail || "未知错误"}`;
+              return;
+            }
+            status.textContent = `[${data.status}] ${data.message}`;
+            if (data.status === "done") {
+              clearInterval(timer);
+              document.getElementById("cookie").value = "";
+              document.getElementById("cookie").placeholder = "已自动捕获并保存，无需重复登录";
+            }
+            if (data.status === "failed") {
+              clearInterval(timer);
+            }
+          } catch (err) {
+            clearInterval(timer);
+            status.textContent = `Cookie捕获失败: ${err.message}`;
+          }
+        }, 1500);
+      }
+
+      document.getElementById("autoCookieBtn").addEventListener("click", async () => {
+        const status = document.getElementById("cookieStatus");
+        try {
+          const data = await postJSON("/api/cookie/auto/start", { source: "douban" });
+          cookieCaptureJobId = data.job_id;
+          status.textContent = `[${data.status}] ${data.message}`;
+          pollCookieCapture();
+        } catch (err) {
+          status.textContent = `启动失败: ${err.message}`;
+        }
+      });
+
+      document.getElementById("syncBtn").addEventListener("click", async () => {
+        const username = document.getElementById("username").value.trim();
+        const syncScope = document.getElementById("syncScope").value;
+        const cookie = document.getElementById("cookie").value.trim();
+        const status = document.getElementById("syncStatus");
+        if (!username) {
+          status.textContent = "请先输入豆瓣用户名";
+          return;
+        }
+        localStorage.setItem('watchwhat_username', username);
+        localStorage.setItem('watchwhat_sync_scope', syncScope);
+        try {
+          const data = await postJSON("/api/sync", {
+            source: "douban",
+            username,
+            cookie: cookie || null,
+            force_full: false,
+            sync_scope: syncScope,
+          });
+          currentJobId = data.job_id;
+          status.textContent = `任务已提交: ${data.job_id}`;
+          pollSync();
+        } catch (err) {
+          status.textContent = `提交失败: ${err.message}`;
+        }
+      });
+
+      document.getElementById("syncFriendsBtn").addEventListener("click", async () => {
+        const username = document.getElementById("username").value.trim();
+        const syncScope = document.getElementById("syncScope").value;
+        const cookie = document.getElementById("cookie").value.trim();
+        const status = document.getElementById("friendSyncStatus");
+        const friendsInput = document.getElementById("friends");
+        const friendWeightsInput = document.getElementById("friendWeights");
+        if (!username) {
+          status.textContent = "请先输入豆瓣用户名";
+          return;
+        }
+
+        try {
+          const data = await postJSON("/api/friends/sync", {
+            source: "douban",
+            username,
+            cookie: cookie || null,
+            force_full: false,
+            sync_scope: syncScope,
+            max_friends: 200,
+          });
+          const profiles = normalizeFriendProfiles(data);
+          if (profiles.length > 0) {
+            currentFriendProfiles = profiles;
+            mergeKnownFriendNames(profiles);
+            const usernames = profiles.map(p => p.username);
+            friendsInput.value = usernames.join(",");
+            friendWeightsInput.value = buildDefaultFriendWeights(usernames, friendWeightsInput.value);
+            document.getElementById("friendAliases").value = mergeAliasesWithProfiles(
+              document.getElementById("friendAliases").value,
+              profiles,
+            );
+            renderFriendProfiles(profiles, friendWeightsInput.value);
+          } else {
+            currentFriendProfiles = [];
+            renderFriendProfiles([], "");
+          }
+          if (data.total_friends > 0) {
+            if (data.status === "local_only") {
+              status.textContent = `豆瓣风控触发，已从本地已同步数据加载 ${data.total_friends} 位好友（本次未重新抓取好友页）。`;
+            } else {
+              status.textContent = `已发现 ${data.total_friends} 位好友，并发起 ${data.job_ids.length} 个同步任务。推荐区已填入“昵称+用户名”好友列表。`;
+            }
+          } else {
+            status.textContent = "未发现可同步好友（可能是账号未公开好友列表或 Cookie 权限不足）。";
+          }
+        } catch (err) {
+          const text = String(err?.message || "");
+          if (text.includes("anti-bot")) {
+            status.textContent = "好友同步失败：豆瓣触发风控，当前无法自动发现好友。可在推荐区手动填好友用户名/豆瓣主页链接（逗号分隔），权重默认1后再推荐。";
+          } else if (text.includes("requires login")) {
+            status.textContent = "好友同步失败：当前 Cookie 登录态不足，请重新自动捕获 Cookie 后重试。";
+          } else {
+            status.textContent = `好友同步失败: ${text}`;
+          }
+        }
+      });
+
+      document.getElementById("friendAliases").addEventListener("input", () => {
+        const value = document.getElementById("friendAliases").value || "";
+        localStorage.setItem("watchwhat_friend_aliases", value);
+        if (Array.isArray(currentFriendProfiles) && currentFriendProfiles.length > 0) {
+          const friendWeightsRaw = document.getElementById("friendWeights").value.trim();
+          renderFriendProfiles(currentFriendProfiles, friendWeightsRaw);
+        }
+      });
+
+      document.getElementById("recommendBtn").addEventListener("click", async () => {
+        const username = document.getElementById("username").value.trim();
+        const query = document.getElementById("query").value.trim();
+        const friendsRaw = document.getElementById("friends").value.trim();
+        const friendWeightsRaw = document.getElementById("friendWeights").value.trim();
+        const picked = collectFriendSelection();
+        const friendUsernames = picked
+          ? picked.selected
+          : (friendsRaw ? friendsRaw.split(",").map(x => x.trim()).filter(Boolean) : []);
+        const friendWeights = picked ? picked.weights : parseFriendWeights(friendWeightsRaw);
+        const profile = document.getElementById("profile");
+        const followupBtn = document.getElementById("followupBtn");
+        const followupAnswer = document.getElementById("followupAnswer");
+
+        if (!username || !query) {
+          profile.textContent = "请先输入用户名和推荐需求";
+          return;
+        }
+
+        try {
+          const data = await postJSON("/api/recommend", {
+            source: "douban",
+            username,
+            query,
+            top_k: 20,
+            allow_followup: true,
+            friend_usernames: friendUsernames,
+            friend_weights: friendWeights,
+          });
+
+          profile.textContent = data.profile_summary || "";
+          renderConstraints(data.applied_constraints);
+
+          if (data.status === "need_followup") {
+            followupSessionId = data.session_id;
+            followupBtn.classList.remove("hidden");
+            followupAnswer.classList.remove("hidden");
+            renderItems([]);
+            profile.textContent = `需要补充：${data.followup_question}`;
+            return;
+          }
+
+          followupSessionId = null;
+          followupBtn.classList.add("hidden");
+          followupAnswer.classList.add("hidden");
+          renderItems(data.items);
+        } catch (err) {
+          profile.textContent = `推荐失败: ${err.message}`;
+        }
+      });
+
+      document.getElementById("followupBtn").addEventListener("click", async () => {
+        const answer = document.getElementById("followupAnswer").value.trim();
+        const profile = document.getElementById("profile");
+        if (!followupSessionId || !answer) {
+          profile.textContent = "请先填写补充偏好";
+          return;
+        }
+        try {
+          const data = await postJSON("/api/recommend/followup", {
+            session_id: followupSessionId,
+            answer,
+          });
+          renderItems(data.items);
+          profile.textContent = data.profile_summary || "";
+          renderConstraints(data.applied_constraints);
+        } catch (err) {
+          profile.textContent = `追问失败: ${err.message}`;
+        }
+      });
+
+      document.getElementById("libraryBtn").addEventListener("click", async () => {
+        loadLibrary();
+      });
+    </script>
+  </body>
+</html>
