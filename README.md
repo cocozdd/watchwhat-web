@@ -13,20 +13,36 @@ Local-first private recommendation web app.
 ## Quick start
 
 ```bash
-cd /Users/cocodzh/Documents/资料整理/笔记整理/watchwhat-web
-python -m venv .venv
+git clone https://github.com/cocozdd/watchwhat-web.git
+cd watchwhat-web
+python3 -m venv .venv
 source .venv/bin/activate
-pip install -e '.[dev]'
+pip install -e ".[dev]"
 cp .env.example .env
-uvicorn app.main:app --reload
+# Edit .env and set WATCHWHAT_DEEPSEEK_API_KEY if you want LLM reranking.
+./start_watchwhat.sh
 ```
 
 Open <http://127.0.0.1:8000>.
 
+Stop service:
+
+```bash
+./stop_watchwhat.sh
+```
+
+Manual run (without helper scripts):
+
+```bash
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
 ## Notes
 
-- Database path defaults to `/Users/cocodzh/.watchwhat/data/watchwhat.db`
-- Cookie is memory-only for sync requests and is never persisted
+- Python 3.9+ is required.
+- Default database path is `~/.watchwhat/data/watchwhat.db` (configurable via `WATCHWHAT_DB_PATH`).
+- Login cookie can be persisted locally by default (`WATCHWHAT_PERSIST_COOKIE_ON_DISK=true`) to avoid re-login.
+- Cookie is stored in local JSON file (`WATCHWHAT_COOKIE_STORE_PATH`) and is not written into SQLite.
 - Data persists across app restarts unless DB file is deleted or moved
 - Optional auto-cookie capture (opens a browser for Douban login) requires:
   - `pip install playwright`
